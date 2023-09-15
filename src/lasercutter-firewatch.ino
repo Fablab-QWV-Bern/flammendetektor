@@ -22,7 +22,7 @@
 #define LED_R 4
 #define LED_G 5
 #define LED_B 1
-#define BUZZER 6
+#define BUZZER 6  // Piezo-Lautsprecher
 #define BUTTON 2
 #define PAUSE_LASER 9  // Relais zur Pausierung des Lasers
 #define AIR_EXTINGUISH 12  // Relais zur Druckluftsteuerung
@@ -36,17 +36,16 @@ enum led_color {
   BLUE = 0B001
 };
 
-volatile boolean btn_pressed = false;
 volatile boolean display_needs_full_redraw = true;
 
-volatile unsigned long pulse_dt_us = ULONG_MAX;
+volatile unsigned long pulse_dt_ms = ULONG_MAX;
 volatile bool pulse_update = false;
 
 // Display driver parameters:          CLK data CS  DC RST
 U8X8_SSD1327_WS_128X128_4W_SW_SPI u8x8(13, 11,  10, 7, 8  );
 
 void setup(void) {
-  analogReference(EXTERNAL); // AREF an 3.3 V von Nano angeschlossen
+  analogReference(EXTERNAL); // AREF connected to Nanos 3.3V
 
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
@@ -86,64 +85,55 @@ void set_led(led_color color) {
     digitalWrite(LED_B, color & 0b001);
 };
 
-void handle_btn() {
-  u8x8.clearDisplay();
-  display_needs_full_redraw = true;
-
-  digitalWrite(PAUSE_LASER, LOW);
-  digitalWrite(AIR_EXTINGUISH, LOW);
-
-  set_led(GREEN);
-  btn_pressed = true;
-}
-
-volatile unsigned long pulse_previous_us = 0;
+volatile unsigned long pulse_previous_ms = 0;
 void handle_pulse() {
-  unsigned long now = micros();
+  unsigned long now = millis();
 
-  pulse_dt_us = now - pulse_previous_us;
+  pulse_dt_ms = now - pulse_previous_ms;
+  pulse_previous_ms = now;
 
-  pulse_previous_us = now;
-
-  if (pulse_previous_us != 0) {
+  if (pulse_previous_ms != 0) {
     pulse_update = true;
   }
 }
 
+volatile uint8_t warning_state = 0;
 void loop(void) {
-  static uint8_t warning_state = 0;
   static uint8_t sensitivity_percent_previous = -1; // to check if the display needs an update
   static double pulse_hz = 0;
+  unsigned long pause_measurement_until = 0;
 
   boolean update_pulse_display = false;
 
-  // Beep if fire was detected
+  // Handle detected pulse
   if (pulse_update) {
+    // Update pulse rate estimation
     set_led(RED);
     digitalWrite(BUZZER, HIGH);
     delay(50);
     set_led(GREEN);
     digitalWrite(BUZZER, LOW);
     pulse_update = false;
-    pulse_hz = 1000000.0/pulse_dt_us;
+    pulse_hz = 1000.0/pulse_dt_ms;
     update_pulse_display = true;
-  } else if (pulse_hz != 0 && micros() - pulse_previous_us > 10000000) {
+
+  } else if (pulse_hz != 0 && millis() - pulse_previous_ms > 10*1000) {
+    // Reset pulse rate estimation to 0 if nothing happened for 10 seconds
     pulse_hz = 0;
     update_pulse_display = true;
   }
 
-  uint32_t potVal = analogRead(POT_INPUT); // liest den Analogwert vom Potentiometer
+  uint32_t potVal = analogRead(POT_INPUT);
 
   uint8_t sensitivity_percent = map(potVal, 0, 1020, 50, 100);
   double effective_pulse_limit_hz = ((double) PULSE_LIMIT_HZ)/(sensitivity_percent)*100;
 
   if (warning_state == 0) {
     //--- Zustand: Keine Warnungen ---//
+    set_led(GREEN);
+    digitalWrite(BUZZER, LOW);
     
     if (display_needs_full_redraw) {
-      set_led(GREEN);
-      digitalWrite(BUZZER, LOW);
-
       u8x8.clearDisplay();
       u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
       u8x8.drawString(1, 2, " ");
@@ -163,7 +153,7 @@ void loop(void) {
       u8x8.print(" Hz  ");
 
       Serial.print("pulse");
-      Serial.println(pulse_dt_us);
+      Serial.println(pulse_dt_ms);
     }
 
     if (sensitivity_percent != sensitivity_percent_previous || display_needs_full_redraw) {
@@ -183,53 +173,55 @@ void loop(void) {
     sensitivity_percent_previous = 0;
   }
 
+  if (pause_measurement_until > millis()) return;
+
   // Check for state transitions
-  uint8_t warning_state_previous = warning_state;
   if (pulse_hz > effective_pulse_limit_hz) {
     warning_state++;
     display_needs_full_redraw = true;
-    pulse_hz = 0;
   } else {
     warning_state = 0;
+    return;
   }
 
-  if (warning_state_previous == warning_state) return;
+  // State was changed.
 
-  // Entering a new state
-
-  if (warning_state == 1) {
-    //--- Zustand: Schwellwert einmalig überschritten ---//
+  if (warning_state >= 1 && warning_state < 3) {
+    //--- Zustand: Schwellwert überschritten ---//
     u8x8.clearDisplay();
     set_led(RED);
-    digitalWrite(BUZZER, HIGH); // Schalte den Piezo-Lautsprecher an.
+    digitalWrite(BUZZER, HIGH);
 
     u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
     u8x8.drawString(1, 10, "GEFAHR!");
     u8x8.setFont(u8x8_font_8x13_1x2_r);
-    u8x8.drawString(11, 12, "     ");
+    u8x8.setCursor(11, 12);
+    u8x8.print(warning_state);
+    //u8x8.drawString(11, 12, "     ");
 
-    delay(1000);
-    digitalWrite(BUZZER, LOW); // Schalte den Piezo-Lautsprecher aus.
-    delay(1000);
+    digitalWrite(BUZZER, LOW);
+    pause_measurement_until = millis() + 1000000;
   }
 
-  if (warning_state == 2) {
-    //--- Zustand: Schwellwert doppelt überschritten: Not-Aus ---//
-    warning_state = 0;
+  if (warning_state == 3) {
+    //--- Zustand: Not-Stopp androhen
     
     u8x8.clearDisplay();
     u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
     u8x8.drawString(2, 5, "START");
     u8x8.drawString(1, 8, "NOT-AUS");
-    //  u8x8.drawString(1, 11, "");
-    delay(2000);
 
-    btn_pressed = false;
     set_led(RED);
-    digitalWrite(BUZZER, HIGH); // Schalte den Piezo-Lautsprecher an.
+    digitalWrite(BUZZER, HIGH);
 
-    delay(1000); // x Sekunden bis Auslösung
-  
+    pause_measurement_until = millis() + 3000000;
+
+    warning_state = 4;
+    return;
+  }
+
+  if (warning_state == 4) {
+    // Not-Stopp ausführen
     u8x8.clearDisplay();
     u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
     u8x8.drawString(0, 1, "*Taster*");
@@ -240,13 +232,15 @@ void loop(void) {
     u8x8.drawString(3, 11, "* ENTER * ");
     u8x8.drawString(0, 13, "auf LASER-PANEL");
 
-    digitalWrite(PAUSE_LASER, HIGH);  // Oeffner von Relais 1 betätigen  (Door Protection)
-
-    while (!btn_pressed) {
-      // halt until button is pressed
-      delay(100);
-    }
-    set_led(GREEN);
+    digitalWrite(PAUSE_LASER, HIGH);
   }
 }
 
+void handle_btn() {
+  u8x8.clearDisplay();
+  display_needs_full_redraw = true;
+
+  if (warning_state == 4) {
+    warning_state = 0;
+  }
+}
