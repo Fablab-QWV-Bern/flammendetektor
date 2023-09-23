@@ -1,12 +1,5 @@
 {
 	"folders": [
-		{
-			"path": "../../../../../Downloads/Flammen-Detktor-Lasercutter-V5_01-UVTRON"
-		},
-		{
-			"name": "230825-163111-nanoatmega328",
-			"path": ".."
-		}
 	],
 	"settings": {
 		"files.associations": {
