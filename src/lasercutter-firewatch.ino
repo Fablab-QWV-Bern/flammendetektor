@@ -138,9 +138,16 @@ void loop(void) {
 
   boolean display_pulse_hz_update = false;
 
+  float pulse_hz_upper_bound = 1000.0/(millis() - pulse_previous_ms);
+
   // Handle detected pulse
   if (pulse_update) {
-    // Update pulse rate estimation
+    pulse_update = false;
+
+    Serial.print("Intervall: ");
+    Serial.println(pulse_dt_ms);
+
+    // Notify about pulse
     LedColor previous = set_led(PINK);
     digitalWrite(BUZZER, HIGH);
     delay(50);
@@ -150,15 +157,18 @@ void loop(void) {
       digitalWrite(BUZZER, LOW);
     }
     set_led(previous);
-    pulse_update = false;
+
+    // Update pulse rate estimation
     pulse_hz = 1000.0/pulse_dt_ms;
     display_pulse_hz_update = true;
 
-  } else if (pulse_hz != 0 && millis() - pulse_previous_ms > 10*1000) {
-    // Reset pulse rate estimation to 0 if nothing happened for 10 seconds
-    pulse_hz = 0;
-    display_pulse_hz_update = true;
-    // TODO: As soon as the pulse period exceeds the previous one, do the update.
+  } else if (pulse_hz_upper_bound < pulse_hz) {
+    // Update the pulse Hz estimation, as it can be guaranteed to be lower.
+    // Reduce display update rate:
+    if (round(pulse_hz*100) != round(pulse_hz_upper_bound*100)) {
+      pulse_hz = pulse_hz_upper_bound;
+      display_pulse_hz_update = true;
+    }
   }
 
   uint32_t potVal = analogRead(POT_INPUT);
@@ -187,9 +197,6 @@ void loop(void) {
       u8x8.setCursor(7, 12);
       u8x8.print(pulse_hz);
       u8x8.print(" Hz  ");
-
-      Serial.print("Intervall: ");
-      Serial.println(pulse_dt_ms);
     }
 
     if (sensitivity_percent != sensitivity_percent_previous || display_needs_full_redraw) {
