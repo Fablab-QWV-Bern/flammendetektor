@@ -24,22 +24,25 @@
 #define LED_B 1
 #define BUZZER 6  // Piezo-Lautsprecher
 #define BUTTON 2
-#define PAUSE_LASER 9  // Relais zur Pausierung des Lasers
-#define AIR_EXTINGUISH 12  // Relais zur Druckluftsteuerung
+#define PAUSE_LASER 12  // Relais zur Pausierung des Lasers
+#define AIR_EXTINGUISH 9  // Relais zur Druckluftsteuerung
 #define SENSOR 3
 #define POT_INPUT PIN_A0
 
-enum led_color {
+enum LedColor {
   OFF = 0B000,
   GREEN = 0B010,
   RED = 0B100,
-  BLUE = 0B001
+  BLUE = 0B001,
+  PINK = 0B101
 };
 
 volatile boolean display_needs_full_redraw = true;
 
+// Any timestamps will overflow after 49 days. This is much longer than the
+// expected operation time of the laser and can be ignored.
 volatile unsigned long pulse_dt_ms = ULONG_MAX;
-volatile bool pulse_update = false;
+volatile bool pulse_update = false; // flag to notifiy about new pulses (and trigger frequency estimation)
 
 // Display driver parameters:          CLK data CS  DC RST
 U8X8_SSD1327_WS_128X128_4W_SW_SPI u8x8(13, 11,  10, 7, 8  );
@@ -72,22 +75,51 @@ void setup(void) {
 
   delay(3000);
 
-  attachInterrupt(digitalPinToInterrupt(BUTTON), handle_btn, RISING);
-  attachInterrupt(digitalPinToInterrupt(SENSOR), handle_pulse, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BUTTON), handle_button, RISING);
+  attachInterrupt(digitalPinToInterrupt(SENSOR), handle_pulse_flank, CHANGE);
 
   u8x8.clearDisplay() ;
   set_led(GREEN);
 }
 
-void set_led(led_color color) {
+LedColor set_led(LedColor color) {
+    static LedColor current = OFF;
     digitalWrite(LED_R, color & 0b100);
     digitalWrite(LED_G, color & 0b010);
     digitalWrite(LED_B, color & 0b001);
+    LedColor previous = current;
+    current = color;
+    return previous;
 };
 
+void handle_pulse_flank() {
+  if (digitalRead(SENSOR)) {
+    handle_pulse_end();
+  } else {
+    handle_pulse_start();
+  }
+}
+
+volatile unsigned long pulse_start_ms = 0;
+void handle_pulse_start() {
+  pulse_start_ms = millis();
+}
+
 volatile unsigned long pulse_previous_ms = 0;
-void handle_pulse() {
+void handle_pulse_end() {
   unsigned long now = millis();
+
+  unsigned long pulse_width_ms = now - pulse_start_ms;
+  if (pulse_width_ms < 13 || pulse_width_ms > 17) {
+    // This was a glitch, not a proper pulse
+    Serial.print("Glitch detected (");
+    Serial.print(pulse_width_ms);
+    Serial.println(" ms)");
+    return;
+  }
+  Serial.print("Pulse detected with ");
+  Serial.print(pulse_width_ms);
+  Serial.println(" ms");
 
   pulse_dt_ms = now - pulse_previous_ms;
   pulse_previous_ms = now;
@@ -97,30 +129,36 @@ void handle_pulse() {
   }
 }
 
-volatile uint8_t warning_state = 0;
+volatile uint8_t warning_state = 0; // the state machines "state"
+volatile boolean button_pressed = false; // flag to check for button presses
 void loop(void) {
   static uint8_t sensitivity_percent_previous = -1; // to check if the display needs an update
   static double pulse_hz = 0;
-  unsigned long pause_measurement_until = 0;
+  static unsigned long pause_state_transition = 0; // allows to pause within a state after entering it
 
-  boolean update_pulse_display = false;
+  boolean display_pulse_hz_update = false;
 
   // Handle detected pulse
   if (pulse_update) {
     // Update pulse rate estimation
-    set_led(RED);
+    LedColor previous = set_led(PINK);
     digitalWrite(BUZZER, HIGH);
     delay(50);
-    set_led(GREEN);
-    digitalWrite(BUZZER, LOW);
+    if (warning_state != 4 || button_pressed) {
+      // In state 4 (emergency stop), the buzzer runs continuously, unless the button was pressed. 
+      // We don't want to interfere with that!
+      digitalWrite(BUZZER, LOW);
+    }
+    set_led(previous);
     pulse_update = false;
     pulse_hz = 1000.0/pulse_dt_ms;
-    update_pulse_display = true;
+    display_pulse_hz_update = true;
 
   } else if (pulse_hz != 0 && millis() - pulse_previous_ms > 10*1000) {
     // Reset pulse rate estimation to 0 if nothing happened for 10 seconds
     pulse_hz = 0;
-    update_pulse_display = true;
+    display_pulse_hz_update = true;
+    // TODO: As soon as the pulse period exceeds the previous one, do the update.
   }
 
   uint32_t potVal = analogRead(POT_INPUT);
@@ -129,10 +167,8 @@ void loop(void) {
   double effective_pulse_limit_hz = ((double) PULSE_LIMIT_HZ)/(sensitivity_percent)*100;
 
   if (warning_state == 0) {
-    //--- Zustand: Keine Warnungen ---//
-    set_led(GREEN);
-    digitalWrite(BUZZER, LOW);
-    
+    //--- Update within state: No warnings ---//
+
     if (display_needs_full_redraw) {
       u8x8.clearDisplay();
       u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
@@ -145,14 +181,14 @@ void loop(void) {
       u8x8.drawString(1, 8, "          ");
     }
 
-    if (update_pulse_display || display_needs_full_redraw) {
+    if (display_pulse_hz_update || display_needs_full_redraw) {
       u8x8.setFont(u8x8_font_8x13_1x2_r);
       u8x8.drawString(0, 12, "Pulse:       ");
       u8x8.setCursor(7, 12);
       u8x8.print(pulse_hz);
       u8x8.print(" Hz  ");
 
-      Serial.print("pulse");
+      Serial.print("Intervall: ");
       Serial.println(pulse_dt_ms);
     }
 
@@ -169,65 +205,75 @@ void loop(void) {
       sensitivity_percent_previous = sensitivity_percent;
     }
     display_needs_full_redraw = false;
-  } else {
-    sensitivity_percent_previous = 0;
   }
 
-  if (pause_measurement_until > millis()) return;
+  if (pause_state_transition > millis()) return;
 
   // Check for state transitions
-  if (pulse_hz > effective_pulse_limit_hz) {
+  if (pulse_hz < effective_pulse_limit_hz){
+    // Pulse frequency is below limit.
+    if (warning_state != 0) {
+      warning_state = 0;
+      display_needs_full_redraw = true;
+      pause_state_transition = 0;
+    }
+    return;
+  } 
+
+  // Pulse frequency is above limit.
+  // Move to next warning state (if not at highest)
+  if (warning_state < 4) {
     warning_state++;
     display_needs_full_redraw = true;
   } else {
-    warning_state = 0;
+    // No state change, since we're already at the highest
     return;
   }
 
-  // State was changed.
+  if (warning_state == 0) {
+    //--- Entering state: No warnings ---//
+    set_led(GREEN);
+    digitalWrite(BUZZER, LOW);
+    digitalWrite(PAUSE_LASER, LOW);
+  }
 
-  if (warning_state >= 1 && warning_state < 3) {
-    //--- Zustand: Schwellwert überschritten ---//
+  if (warning_state == 1 || warning_state == 2) {
+    //--- Entering state: Limit exceeded once or twice ---//
     u8x8.clearDisplay();
     set_led(RED);
-    digitalWrite(BUZZER, HIGH);
 
     u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
-    u8x8.drawString(1, 10, "GEFAHR!");
-    u8x8.setFont(u8x8_font_8x13_1x2_r);
-    u8x8.setCursor(11, 12);
+    u8x8.drawString(1, 5, "GEFAHR!");
+    u8x8.setCursor(6, 9);
     u8x8.print(warning_state);
-    //u8x8.drawString(11, 12, "     ");
 
-    digitalWrite(BUZZER, LOW);
-    pause_measurement_until = millis() + 1000000;
+    pause_state_transition = millis() + 2*1000;
   }
 
   if (warning_state == 3) {
-    //--- Zustand: Not-Stopp androhen
+    //--- Entering state: Announce emergency pause ---//
+    digitalWrite(BUZZER, HIGH);
+    set_led(RED);
     
     u8x8.clearDisplay();
     u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
     u8x8.drawString(2, 5, "START");
     u8x8.drawString(1, 8, "NOT-AUS");
 
-    set_led(RED);
-    digitalWrite(BUZZER, HIGH);
-
-    pause_measurement_until = millis() + 3000000;
-
-    warning_state = 4;
-    return;
+    pause_state_transition = millis() + 2*1000;
   }
 
   if (warning_state == 4) {
-    // Not-Stopp ausführen
+    //--- Entering state: Emergency pause ---//
+    button_pressed = false;
+    digitalWrite(BUZZER, HIGH);
+    set_led(RED);
+
     u8x8.clearDisplay();
-    u8x8.setFont(u8x8_font_px437wyse700b_2x2_f);
-    u8x8.drawString(0, 1, "*Taster*");
     u8x8.setFont(u8x8_font_8x13_1x2_r);
-    u8x8.drawString(0, 4, "druecken, wenn");
-    u8x8.drawString(0, 6, "Feuer GELOESCHT!");
+    u8x8.drawString(0, 1, "Taster druecken!");
+    u8x8.drawString(0, 4, "Wenn Feuer");
+    u8x8.drawString(2, 6, "GELOESCHT!");
     u8x8.drawString(0, 9, "Fortfahren  mit");
     u8x8.drawString(3, 11, "* ENTER * ");
     u8x8.drawString(0, 13, "auf LASER-PANEL");
@@ -236,11 +282,7 @@ void loop(void) {
   }
 }
 
-void handle_btn() {
-  u8x8.clearDisplay();
-  display_needs_full_redraw = true;
-
-  if (warning_state == 4) {
-    warning_state = 0;
-  }
+void handle_button() {
+  digitalWrite(BUZZER, LOW);
+  button_pressed = true;
 }
