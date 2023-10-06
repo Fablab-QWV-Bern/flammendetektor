@@ -1,6 +1,5 @@
 /*
   Flammendetektor für Lasercutter
-  v6 2023-08-13
 
   Peter Schurter
   Matthias Roggo 
@@ -151,8 +150,8 @@ void loop(void) {
     LedColor previous = set_led(PINK);
     digitalWrite(BUZZER, HIGH);
     delay(50);
-    if (warning_state != 4 || button_pressed) {
-      // In state 4 (emergency stop), the buzzer runs continuously, unless the button was pressed. 
+    if (warning_state != 4) {
+      // In state 4 (emergency stop), the buzzer runs continuously. 
       // We don't want to interfere with that!
       digitalWrite(BUZZER, LOW);
     }
@@ -217,12 +216,17 @@ void loop(void) {
   if (pause_state_transition > millis()) return;
 
   // Check for state transitions
-  if (pulse_hz < effective_pulse_limit_hz){
+  if (pulse_hz < effective_pulse_limit_hz && (warning_state != 4 || button_pressed)){
     // Pulse frequency is below limit.
     if (warning_state != 0) {
       warning_state = 0;
       display_needs_full_redraw = true;
       pause_state_transition = 0;
+
+      //--- Entering state: No warnings ---//
+      set_led(GREEN);
+      digitalWrite(BUZZER, LOW);
+      digitalWrite(PAUSE_LASER, LOW);
     }
     return;
   } 
@@ -235,13 +239,6 @@ void loop(void) {
   } else {
     // No state change, since we're already at the highest
     return;
-  }
-
-  if (warning_state == 0) {
-    //--- Entering state: No warnings ---//
-    set_led(GREEN);
-    digitalWrite(BUZZER, LOW);
-    digitalWrite(PAUSE_LASER, LOW);
   }
 
   if (warning_state == 1 || warning_state == 2) {
@@ -290,6 +287,5 @@ void loop(void) {
 }
 
 void handle_button() {
-  digitalWrite(BUZZER, LOW);
   button_pressed = true;
 }
