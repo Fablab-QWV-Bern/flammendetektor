@@ -1,5 +1,6 @@
 /*
   Flammendetektor für Lasercutter
+  Platine C10807  12-24 Volt
 
   Peter Schurter
   Matthias Roggo 
@@ -109,7 +110,7 @@ void handle_pulse_end() {
   unsigned long now = millis();
 
   unsigned long pulse_width_ms = now - pulse_start_ms;
-  if (pulse_width_ms < 13 || pulse_width_ms > 17) {
+  if (pulse_width_ms < 7 || pulse_width_ms > 14) {
     // This was a glitch, not a proper pulse
     Serial.print("Glitch detected (");
     Serial.print(pulse_width_ms);
